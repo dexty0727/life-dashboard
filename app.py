@@ -59,45 +59,21 @@ def get_google_drive_credentials_path():
 
 def get_google_drive_credentials():
 
-    # Streamlit Cloud: read full JSON from Secrets
     try:
-        google_json = st.secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON", None)
-
-        if google_json:
+        if "GOOGLE_SERVICE_ACCOUNT_JSON" in st.secrets:
             import json
 
+            google_json = st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"]["json"]
             service_account_info = json.loads(google_json)
 
-            credentials = service_account.Credentials.from_service_account_info(
+            return service_account.Credentials.from_service_account_info(
                 service_account_info,
                 scopes=GOOGLE_DRIVE_SCOPES
             )
-
-            return credentials
 
     except Exception as e:
         st.warning(f"Google Drive cloud credentials failed: {e}")
 
-    # Streamlit Cloud alternate: read TOML section
-    try:
-        if "gdrive_service_account" in st.secrets:
-
-            service_account_info = dict(st.secrets["gdrive_service_account"])
-
-            if "private_key" in service_account_info:
-                service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
-
-            credentials = service_account.Credentials.from_service_account_info(
-                service_account_info,
-                scopes=GOOGLE_DRIVE_SCOPES
-            )
-
-            return credentials
-
-    except Exception as e:
-        st.warning(f"Google Drive TOML credentials failed: {e}")
-
-    # Local machine fallback
     credentials_path = Path(r"C:\LifeDashboard\credentials.json")
 
     if credentials_path.exists():
