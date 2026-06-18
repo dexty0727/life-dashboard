@@ -57,29 +57,57 @@ def get_google_drive_credentials_path():
 
 
 def get_google_drive_credentials():
-    credentials_path = get_google_drive_credentials_path()
 
-    if not credentials_path.exists():
-        return None
+    # Streamlit Cloud
+    try:
+        if "gdrive_service_account" in st.secrets:
 
-    credentials = service_account.Credentials.from_service_account_file(
-        credentials_path,
-        scopes=GOOGLE_DRIVE_SCOPES
-    )
+            credentials = service_account.Credentials.from_service_account_info(
+                dict(st.secrets["gdrive_service_account"]),
+                scopes=GOOGLE_DRIVE_SCOPES
+            )
 
-    return credentials
+            return credentials
+
+    except Exception:
+        pass
+
+    # Local machine fallback
+    credentials_path = Path(r"C:\LifeDashboard\credentials.json")
+
+    if credentials_path.exists():
+        return service_account.Credentials.from_service_account_file(
+            credentials_path,
+            scopes=GOOGLE_DRIVE_SCOPES
+        )
+
+    return None
 
 
 def should_use_google_drive():
+
     enabled = get_secret_value("google_drive", "enabled", False)
     folder_id = get_secret_value("google_drive", "folder_id", "")
-    credentials_path = get_google_drive_credentials_path()
+
+    has_cloud_credentials = False
+
+    try:
+        has_cloud_credentials = "gdrive_service_account" in st.secrets
+    except Exception:
+        pass
+
+    has_local_credentials = Path(
+        r"C:\LifeDashboard\credentials.json"
+    ).exists()
 
     return bool(
         enabled
         and folder_id
-        and credentials_path.exists()
         and GOOGLE_DRIVE_AVAILABLE
+        and (
+            has_cloud_credentials
+            or has_local_credentials
+        )
     )
 
 
