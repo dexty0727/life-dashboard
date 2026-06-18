@@ -239,6 +239,7 @@ def sync_google_drive_folder(folder_id):
 
 
 def configure_data_source():
+    st.write("DEBUG DATA SOURCE:", DATA_SOURCE_LABEL, DATA_SOURCE_DETAIL, GOOGLE_DRIVE_STATUS)
     global DATA_FOLDER, DATA_SOURCE_LABEL, DATA_SOURCE_DETAIL, GOOGLE_DRIVE_STATUS
 
     if not GOOGLE_DRIVE_AVAILABLE:
