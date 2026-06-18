@@ -58,51 +58,47 @@ def get_google_drive_credentials_path():
 
 
 def get_google_drive_credentials():
-    """Get Google Drive credentials from Streamlit Cloud secrets first, then local credentials.json.
 
-    This makes the same app work in both places:
-    - Streamlit Cloud: uses st.secrets
-    - Local laptop: uses C:\\LifeDashboard\\credentials.json
-    """
+    # Streamlit Cloud: read full JSON from Secrets
+    try:
+        google_json = st.secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON", None)
 
-    # Option 1: Streamlit Cloud secrets using [gdrive_service_account]
+        if google_json:
+            import json
+
+            service_account_info = json.loads(google_json)
+
+            credentials = service_account.Credentials.from_service_account_info(
+                service_account_info,
+                scopes=GOOGLE_DRIVE_SCOPES
+            )
+
+            return credentials
+
+    except Exception as e:
+        st.warning(f"Google Drive cloud credentials failed: {e}")
+
+    # Streamlit Cloud alternate: read TOML section
     try:
         if "gdrive_service_account" in st.secrets:
+
             service_account_info = dict(st.secrets["gdrive_service_account"])
 
             if "private_key" in service_account_info:
-                service_account_info["private_key"] = (
-                    str(service_account_info["private_key"])
-                    .replace("\\n", "\n")
-                )
+                service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
 
-            return service_account.Credentials.from_service_account_info(
+            credentials = service_account.Credentials.from_service_account_info(
                 service_account_info,
                 scopes=GOOGLE_DRIVE_SCOPES
             )
+
+            return credentials
+
     except Exception as e:
-        st.warning(f"Could not read Google credentials from [gdrive_service_account] secrets: {e}")
+        st.warning(f"Google Drive TOML credentials failed: {e}")
 
-    # Option 2: Streamlit Cloud secrets using one full JSON string
-    try:
-        if "GOOGLE_SERVICE_ACCOUNT_JSON" in st.secrets:
-            service_account_info = json.loads(st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
-
-            if "private_key" in service_account_info:
-                service_account_info["private_key"] = (
-                    str(service_account_info["private_key"])
-                    .replace("\\n", "\n")
-                )
-
-            return service_account.Credentials.from_service_account_info(
-                service_account_info,
-                scopes=GOOGLE_DRIVE_SCOPES
-            )
-    except Exception as e:
-        st.warning(f"Could not read Google credentials from GOOGLE_SERVICE_ACCOUNT_JSON secrets: {e}")
-
-    # Option 3: Local machine fallback
-    credentials_path = get_google_drive_credentials_path()
+    # Local machine fallback
+    credentials_path = Path(r"C:\LifeDashboard\credentials.json")
 
     if credentials_path.exists():
         return service_account.Credentials.from_service_account_file(
@@ -130,14 +126,34 @@ def has_google_drive_credentials():
 
 
 def should_use_google_drive():
+
     enabled = get_secret_value("google_drive", "enabled", False)
     folder_id = get_secret_value("google_drive", "folder_id", "")
+
+    has_cloud_json = False
+    has_cloud_toml = False
+
+    try:
+        has_cloud_json = bool(st.secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON", None))
+    except Exception:
+        pass
+
+    try:
+        has_cloud_toml = "gdrive_service_account" in st.secrets
+    except Exception:
+        pass
+
+    has_local_credentials = Path(r"C:\LifeDashboard\credentials.json").exists()
 
     return bool(
         enabled
         and folder_id
-        and has_google_drive_credentials()
         and GOOGLE_DRIVE_AVAILABLE
+        and (
+            has_cloud_json
+            or has_cloud_toml
+            or has_local_credentials
+        )
     )
 
 
