@@ -639,6 +639,31 @@ st.markdown("""
         border-radius: 12px !important;
     }
 
+
+
+    /* Strong readable headings outside the hero */
+    [data-testid="stMarkdownContainer"] h1,
+    [data-testid="stMarkdownContainer"] h2,
+    [data-testid="stMarkdownContainer"] h3,
+    [data-testid="stMarkdownContainer"] h4,
+    [data-testid="stMarkdownContainer"] h5,
+    [data-testid="stMarkdownContainer"] h6 {
+        color: #1f2937 !important;
+        font-weight: 950 !important;
+        letter-spacing: -0.3px;
+    }
+
+    .app-header h1,
+    .app-header p,
+    .app-header .hero-eyebrow,
+    .app-header .hero-chip {
+        color: white !important;
+    }
+
+    .app-header .hero-eyebrow {
+        color: #fed7aa !important;
+    }
+
     @media (max-width: 900px) {
         .fancy-card-grid {
             grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2448,7 +2473,7 @@ expenses_2026_06.xlsx
 if page == "Planning":
     section_header(
         "🗓️ Financial Planning",
-        "Scenario planning, financial freedom runway, future income views, and calculation engine."
+        "Scenario planning, future portfolio views, lifestyle costs, and calculation engine."
     )
 
     if planning is None:
@@ -2501,46 +2526,70 @@ Venkat_FinancialPlanning.xlsx
                 )
                 scenarios_df = scenarios_df.sort_values(["scenario", "period_sort"])
 
+                scenario_names = list(scenarios_df["scenario"].dropna().unique())
+
+                selected_planning_scenario = st.selectbox(
+                    "Select scenario",
+                    ["All Scenarios"] + scenario_names,
+                    index=0,
+                    key="planning_scenario_filter"
+                )
+
+                if selected_planning_scenario == "All Scenarios":
+                    filtered_scenarios = scenarios_df.copy()
+                    filtered_living_costs = living_costs_df.copy()
+                    selected_label = "All Scenarios"
+                else:
+                    filtered_scenarios = scenarios_df[
+                        scenarios_df["scenario"] == selected_planning_scenario
+                    ].copy()
+                    filtered_living_costs = living_costs_df[
+                        living_costs_df["scenario"] == selected_planning_scenario
+                    ].copy() if not living_costs_df.empty and "scenario" in living_costs_df.columns else living_costs_df.copy()
+                    selected_label = selected_planning_scenario
+
                 latest_scenarios = (
-                    scenarios_df
+                    filtered_scenarios
                     .sort_values(["scenario", "period_sort"])
                     .groupby("scenario", as_index=False)
                     .tail(1)
                 )
 
-                current_scenarios = scenarios_df[
-                    scenarios_df["period"].astype(str).str.lower() == "current"
+                current_scenarios = filtered_scenarios[
+                    filtered_scenarios["period"].astype(str).str.lower() == "current"
                 ].copy()
 
-                scenario_names = list(scenarios_df["scenario"].dropna().unique())
-                scenario_columns = st.columns(len(scenario_names))
+                st.markdown("### Scenario Snapshot")
 
-                for col, scenario_name in zip(scenario_columns, scenario_names):
-                    scenario_data = scenarios_df[scenarios_df["scenario"] == scenario_name].copy()
+                if selected_planning_scenario == "All Scenarios":
+                    best_row = latest_scenarios.sort_values("total_value", ascending=False).iloc[0]
+                    highest_income_row = latest_scenarios.sort_values("monthly_avg_12", ascending=False).iloc[0]
+                    total_current_value = current_scenarios["total_value"].sum() if not current_scenarios.empty else 0
+                    scenario_count = filtered_scenarios["scenario"].nunique()
+                    final_period = str(best_row["period"])
+
+                    c1, c2, c3, c4, c5 = st.columns(5)
+                    c1.metric("View", "All Scenarios")
+                    c2.metric("Scenarios", f"{scenario_count}")
+                    c3.metric("Best 4-Year Value", money_text(best_row["total_value"]))
+                    c4.metric("Best Monthly @ 12%", money_text(highest_income_row["monthly_avg_12"]))
+                    c5.metric("Planning Horizon", final_period)
+                else:
+                    scenario_data = filtered_scenarios.sort_values("period_sort").copy()
                     current_row = scenario_data.iloc[0]
                     final_row = scenario_data.iloc[-1]
+                    portfolio_growth = final_row["total_value"] - current_row["total_value"]
 
-                    short_name = scenario_name.replace("Scenario 1 - ", "").replace("Scenario 2 - ", "").replace("Scenario 3 - ", "")
-
-                    with col:
-                        st.markdown(
-                            f"""
-                            <div class="section-card">
-                                <div class="section-title">{short_name}</div>
-                                <div class="section-subtitle">Current to 4-year financial planning view.</div>
-                            </div>
-                            """,
-                            unsafe_allow_html=True
-                        )
-                        st.metric("Current Portfolio", money_text(current_row["total_value"]))
-                        st.metric("4-Year Portfolio", money_text(final_row["total_value"]))
-                        st.metric("Monthly Income @ 12%", money_text(final_row["monthly_avg_12"]))
-                        st.metric("Monthly Income @ 20%", money_text(final_row["monthly_best_20"]))
-                        st.metric("Freedom Cost %", percent_text(final_row["freedom_cost_pct"]))
+                    c1, c2, c3, c4, c5 = st.columns(5)
+                    c1.metric("Current Portfolio", money_text(current_row["total_value"]))
+                    c2.metric("4-Year Portfolio", money_text(final_row["total_value"]))
+                    c3.metric("Portfolio Growth", money_text(portfolio_growth))
+                    c4.metric("Monthly @ 12%", money_text(final_row["monthly_avg_12"]))
+                    c5.metric("Monthly @ 20%", money_text(final_row["monthly_best_20"]))
 
                 st.divider()
 
-                chart_df = scenarios_df.copy()
+                chart_df = filtered_scenarios.copy()
                 chart_df["period_label"] = chart_df["period"].astype(str)
 
                 fig_portfolio_scenarios = px.line(
@@ -2549,7 +2598,7 @@ Venkat_FinancialPlanning.xlsx
                     y="total_value",
                     color="scenario",
                     markers=True,
-                    title="Scenario Portfolio Value Growth",
+                    title=f"Scenario Portfolio Value Growth - {selected_label}",
                     text="total_value"
                 )
                 fig_portfolio_scenarios.update_traces(
@@ -2558,36 +2607,24 @@ Venkat_FinancialPlanning.xlsx
                 )
                 st.plotly_chart(style_chart_base(fig_portfolio_scenarios), use_container_width=True)
 
-                fig_income_scenarios = px.line(
-                    chart_df,
-                    x="period_label",
-                    y="monthly_avg_12",
-                    color="scenario",
-                    markers=True,
-                    title="Projected Monthly Income at 12%",
-                    text="monthly_avg_12"
-                )
-                fig_income_scenarios.update_traces(
-                    texttemplate="AED %{y:,.0f}",
-                    textposition="top center"
-                )
-                st.plotly_chart(style_chart_base(fig_income_scenarios), use_container_width=True)
-
-                freedom_df = latest_scenarios.copy()
-                freedom_df["freedom_cost_label"] = (freedom_df["freedom_cost_pct"] * 100).round(2).astype(str) + "%"
-
-                fig_freedom = px.bar(
-                    freedom_df,
-                    x="scenario",
-                    y="freedom_cost_pct",
-                    text="freedom_cost_label",
-                    title="Financial Freedom Cost % at 4 Years"
-                )
-                fig_freedom.update_layout(yaxis_tickformat=".2%")
-                st.plotly_chart(style_bar_chart(fig_freedom), use_container_width=True)
+                st.markdown("### Monthly Lifestyle Cost")
+                if not filtered_living_costs.empty:
+                    living_display = filtered_living_costs.copy()
+                    st.dataframe(
+                        living_display,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "scenario": "Scenario",
+                            "cost_item": "Cost Item",
+                            "monthly_amount": st.column_config.NumberColumn("Monthly Amount", format="AED %.0f")
+                        }
+                    )
+                else:
+                    st.info("No monthly lifestyle cost data found for the selected scenario.")
 
                 st.markdown("### Scenario Table")
-                scenario_display = scenarios_df[[
+                scenario_display = filtered_scenarios[[
                     "scenario",
                     "period",
                     "total_value",
@@ -2613,20 +2650,6 @@ Venkat_FinancialPlanning.xlsx
                         "freedom_cost_pct": st.column_config.NumberColumn("Freedom Cost %", format="%.2f%%")
                     }
                 )
-
-                st.markdown("### Monthly Lifestyle Cost")
-                if not living_costs_df.empty:
-                    living_display = living_costs_df.copy()
-                    st.dataframe(
-                        living_display,
-                        use_container_width=True,
-                        hide_index=True,
-                        column_config={
-                            "scenario": "Scenario",
-                            "cost_item": "Cost Item",
-                            "monthly_amount": st.column_config.NumberColumn("Monthly Amount", format="AED %.0f")
-                        }
-                    )
 
         with calculation_tab:
             st.markdown("### Financial Planning Calculation Engine")
