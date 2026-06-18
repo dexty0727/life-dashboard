@@ -25,6 +25,7 @@ GOOGLE_DRIVE_STATUS = "Not connected"
 
 GOOGLE_DRIVE_ALLOWED_EXTENSIONS = [".csv", ".xlsx"]
 GOOGLE_DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+GOOGLE_DRIVE_DEBUG_MESSAGES = []
 
 
 def get_secret_section(section_name):
@@ -58,14 +59,38 @@ def get_google_drive_credentials_path():
 
 
 def get_google_drive_credentials():
-    """Get Google Drive credentials from Streamlit Cloud secrets first, then local credentials.json.
+    """Get Google Drive credentials from Streamlit Cloud secrets first, then local credentials.json."""
 
-    This makes the same app work in both places:
-    - Streamlit Cloud: uses st.secrets
-    - Local laptop: uses C:\\LifeDashboard\\credentials.json
-    """
+    # Option 1: Streamlit Cloud secrets using full JSON.
+    # Recommended Secrets format:
+    # [GOOGLE_SERVICE_ACCOUNT_JSON]
+    # json = '''{...full Google JSON...}'''
+    try:
+        if "GOOGLE_SERVICE_ACCOUNT_JSON" in st.secrets:
+            raw_secret = st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"]
 
-    # Option 1: Streamlit Cloud secrets using [gdrive_service_account]
+            # Streamlit returns section secrets as an AttrDict, not always a normal dict.
+            if hasattr(raw_secret, "get"):
+                raw_secret = raw_secret.get("json", "")
+
+            service_account_info = json.loads(str(raw_secret))
+
+            if "private_key" in service_account_info:
+                service_account_info["private_key"] = (
+                    str(service_account_info["private_key"])
+                    .replace("\\n", "\n")
+                )
+
+            return service_account.Credentials.from_service_account_info(
+                service_account_info,
+                scopes=GOOGLE_DRIVE_SCOPES
+            )
+    except Exception as e:
+        GOOGLE_DRIVE_DEBUG_MESSAGES.append(
+            f"Could not read GOOGLE_SERVICE_ACCOUNT_JSON secret: {e}"
+        )
+
+    # Option 2: Streamlit Cloud secrets using [gdrive_service_account].
     try:
         if "gdrive_service_account" in st.secrets:
             service_account_info = dict(st.secrets["gdrive_service_account"])
@@ -81,35 +106,11 @@ def get_google_drive_credentials():
                 scopes=GOOGLE_DRIVE_SCOPES
             )
     except Exception as e:
-        st.warning(f"Could not read Google credentials from [gdrive_service_account] secrets: {e}")
+        GOOGLE_DRIVE_DEBUG_MESSAGES.append(
+            f"Could not read gdrive_service_account secret: {e}"
+        )
 
-    # Option 2: Streamlit Cloud secrets using one full JSON string
-    try:
-        if "GOOGLE_SERVICE_ACCOUNT_JSON" in st.secrets:
-            raw_secret = st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"]
-
-            # Supports both formats:
-            # 1) GOOGLE_SERVICE_ACCOUNT_JSON = '''{...}'''
-            # 2) [GOOGLE_SERVICE_ACCOUNT_JSON] with json = '''{...}'''
-            if isinstance(raw_secret, dict):
-                raw_secret = raw_secret.get("json", "")
-
-            service_account_info = json.loads(raw_secret)
-
-            if "private_key" in service_account_info:
-                service_account_info["private_key"] = (
-                    str(service_account_info["private_key"])
-                    .replace("\\n", "\n")
-                )
-
-            return service_account.Credentials.from_service_account_info(
-                service_account_info,
-                scopes=GOOGLE_DRIVE_SCOPES
-            )
-    except Exception as e:
-        st.warning(f"Could not read Google credentials from GOOGLE_SERVICE_ACCOUNT_JSON secrets: {e}")
-
-    # Option 3: Local machine fallback
+    # Option 3: Local machine fallback.
     credentials_path = get_google_drive_credentials_path()
 
     if credentials_path.exists():
@@ -118,6 +119,9 @@ def get_google_drive_credentials():
             scopes=GOOGLE_DRIVE_SCOPES
         )
 
+    GOOGLE_DRIVE_DEBUG_MESSAGES.append(
+        "No Google Drive credentials found in Streamlit Secrets or local credentials.json."
+    )
     return None
 
 
@@ -160,8 +164,9 @@ def sync_google_drive_folder(folder_id):
     credentials = get_google_drive_credentials()
 
     if credentials is None:
+        details = " | ".join(GOOGLE_DRIVE_DEBUG_MESSAGES)
         raise FileNotFoundError(
-            "credentials.json not found at C:\\LifeDashboard\\credentials.json"
+            f"Google Drive credentials could not be created. {details}"
         )
 
     service = build("drive", "v3", credentials=credentials)
