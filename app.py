@@ -465,6 +465,25 @@ st.markdown("""
         color: #0f172a !important;
         font-weight: 950 !important;
         letter-spacing: -0.8px;
+        font-size: 24px !important;
+        line-height: 1.15 !important;
+        white-space: normal !important;
+        overflow-wrap: anywhere !important;
+    }
+
+    [data-testid="stMetric"] label {
+        font-size: 12px !important;
+        line-height: 1.2 !important;
+        white-space: normal !important;
+    }
+
+    h1, h2, h3, h4 {
+        color: #1f2937 !important;
+        font-weight: 900 !important;
+    }
+
+    .app-header h1, .app-header h2, .app-header h3, .app-header h4 {
+        color: #ffffff !important;
     }
 
     [data-testid="stMetricDelta"] {
@@ -976,18 +995,45 @@ def safe_number(value):
     return pd.to_numeric(value, errors="coerce")
 
 
-def money_text(value, currency="AED"):
+def indian_number_text(value, decimals=0):
     value = safe_number(value)
     if pd.isna(value):
         return "-"
-    return f"{currency} {value:,.0f}"
+
+    negative = value < 0
+    value = abs(float(value))
+
+    if decimals == 0:
+        number_text = str(int(round(value)))
+        decimal_text = ""
+    else:
+        fixed = f"{value:.{decimals}f}"
+        number_text, decimal_part = fixed.split(".")
+        decimal_text = f".{decimal_part}"
+
+    if len(number_text) <= 3:
+        grouped = number_text
+    else:
+        last_three = number_text[-3:]
+        remaining = number_text[:-3]
+        groups = []
+        while len(remaining) > 2:
+            groups.insert(0, remaining[-2:])
+            remaining = remaining[:-2]
+        if remaining:
+            groups.insert(0, remaining)
+        grouped = ",".join(groups + [last_three])
+
+    sign = "-" if negative else ""
+    return f"{sign}{grouped}{decimal_text}"
 
 
-def percent_text(value):
-    value = safe_number(value)
-    if pd.isna(value):
-        return "-"
-    return f"{value * 100:.2f}%"
+def money_text(value):
+    return indian_number_text(value, decimals=0)
+
+
+def one_decimal_text(value):
+    return indian_number_text(value, decimals=1)
 
 
 def parse_financial_planning_workbook(raw, source_file):
@@ -2591,6 +2637,7 @@ Venkat_FinancialPlanning.xlsx
 
                 chart_df = filtered_scenarios.copy()
                 chart_df["period_label"] = chart_df["period"].astype(str)
+                chart_df["total_value_label"] = chart_df["total_value"].apply(money_text)
 
                 fig_portfolio_scenarios = px.line(
                     chart_df,
@@ -2599,10 +2646,9 @@ Venkat_FinancialPlanning.xlsx
                     color="scenario",
                     markers=True,
                     title=f"Scenario Portfolio Value Growth - {selected_label}",
-                    text="total_value"
+                    text="total_value_label"
                 )
                 fig_portfolio_scenarios.update_traces(
-                    texttemplate="AED %{y:,.0f}",
                     textposition="top center"
                 )
                 st.plotly_chart(style_chart_base(fig_portfolio_scenarios), use_container_width=True)
@@ -2610,6 +2656,7 @@ Venkat_FinancialPlanning.xlsx
                 st.markdown("### Monthly Lifestyle Cost")
                 if not filtered_living_costs.empty:
                     living_display = filtered_living_costs.copy()
+                    living_display["monthly_amount"] = living_display["monthly_amount"].apply(money_text)
                     st.dataframe(
                         living_display,
                         use_container_width=True,
@@ -2617,7 +2664,7 @@ Venkat_FinancialPlanning.xlsx
                         column_config={
                             "scenario": "Scenario",
                             "cost_item": "Cost Item",
-                            "monthly_amount": st.column_config.NumberColumn("Monthly Amount", format="AED %.0f")
+                            "monthly_amount": "Monthly Amount"
                         }
                     )
                 else:
@@ -2635,6 +2682,12 @@ Venkat_FinancialPlanning.xlsx
                     "freedom_cost_pct"
                 ]].copy()
 
+                for col in ["total_value", "monthly_low_7", "monthly_avg_12", "monthly_best_20"]:
+                    scenario_display[col] = scenario_display[col].apply(money_text)
+
+                scenario_display["experiment_loss_pct"] = scenario_display["experiment_loss_pct"].apply(one_decimal_text)
+                scenario_display["freedom_cost_pct"] = scenario_display["freedom_cost_pct"].apply(one_decimal_text)
+
                 st.dataframe(
                     scenario_display,
                     use_container_width=True,
@@ -2642,12 +2695,12 @@ Venkat_FinancialPlanning.xlsx
                     column_config={
                         "scenario": "Scenario",
                         "period": "Period",
-                        "total_value": st.column_config.NumberColumn("Total Value", format="AED %.0f"),
-                        "monthly_low_7": st.column_config.NumberColumn("Monthly @ 7%", format="AED %.0f"),
-                        "monthly_avg_12": st.column_config.NumberColumn("Monthly @ 12%", format="AED %.0f"),
-                        "monthly_best_20": st.column_config.NumberColumn("Monthly @ 20%", format="AED %.0f"),
-                        "experiment_loss_pct": st.column_config.NumberColumn("Experiment Loss %", format="%.2f%%"),
-                        "freedom_cost_pct": st.column_config.NumberColumn("Freedom Cost %", format="%.2f%%")
+                        "total_value": "Total Value",
+                        "monthly_low_7": "Monthly @ 7%",
+                        "monthly_avg_12": "Monthly @ 12%",
+                        "monthly_best_20": "Monthly @ 20%",
+                        "experiment_loss_pct": "Experiment Cost",
+                        "freedom_cost_pct": "Freedom Cost"
                     }
                 )
 
@@ -2683,35 +2736,47 @@ Venkat_FinancialPlanning.xlsx
                     barmode="group",
                     title="Capital Build-Up Summary"
                 )
-                fig_calc_summary.update_traces(texttemplate="AED %{y:,.0f}", textposition="outside")
+                summary_melt["amount_label"] = summary_melt["amount"].apply(money_text)
+                fig_calc_summary.update_traces(textposition="outside")
+                fig_calc_summary.update_traces(text=summary_melt["amount_label"])
                 st.plotly_chart(style_chart_base(fig_calc_summary), use_container_width=True)
 
+                calc_summary_display = calc_summary_df.copy()
+                for col in ["with_all_investments", "without_indian_savings", "without_indian_and_real_estate"]:
+                    if col in calc_summary_display.columns:
+                        calc_summary_display[col] = calc_summary_display[col].apply(money_text)
+
                 st.dataframe(
-                    calc_summary_df,
+                    calc_summary_display,
                     use_container_width=True,
                     hide_index=True,
                     column_config={
                         "metric": "Metric",
-                        "with_all_investments": st.column_config.NumberColumn("With All Investments", format="AED %.0f"),
-                        "without_indian_savings": st.column_config.NumberColumn("Without Indian Savings", format="AED %.0f"),
-                        "without_indian_and_real_estate": st.column_config.NumberColumn("Without Indian + Real Estate", format="AED %.0f")
+                        "with_all_investments": "With All Investments",
+                        "without_indian_savings": "Without Indian Savings",
+                        "without_indian_and_real_estate": "Without Indian + Real Estate"
                     }
                 )
 
             st.markdown("### Salary, Bonus and Benefit Build-Up")
             if not calc_main_df.empty:
+                calc_main_display = calc_main_df.copy()
+                for col in calc_main_display.columns:
+                    if col != "component":
+                        calc_main_display[col] = calc_main_display[col].apply(money_text)
+
                 st.dataframe(
-                    calc_main_df,
+                    calc_main_display,
                     use_container_width=True,
                     hide_index=True,
                     column_config={
                         "component": "Component",
-                        "2_years_value": st.column_config.NumberColumn("2 Years Value", format="AED %.0f"),
-                        "2_years_alt": st.column_config.NumberColumn("2 Years Alt", format="AED %.0f"),
-                        "3_years_value": st.column_config.NumberColumn("3 Years Value", format="AED %.0f"),
-                        "3_years_alt": st.column_config.NumberColumn("3 Years Alt", format="AED %.0f"),
-                        "4_years_value": st.column_config.NumberColumn("4 Years Value", format="AED %.0f"),
-                        "4_years_alt": st.column_config.NumberColumn("4 Years Alt", format="AED %.0f")
+                        "2_years_value": "2 Years Value",
+                        "2_years_alt": "2 Years Alt",
+                        "3_years_value": "3 Years Value",
+                        "3_years_alt": "3 Years Alt",
+                        "4_years_value": "4 Years Value",
+                        "4_years_alt": "4 Years Alt"
                     }
                 )
 
@@ -2727,33 +2792,43 @@ Venkat_FinancialPlanning.xlsx
                     text="amount",
                     title="Asset and Payout Assumptions"
                 )
-                fig_assets.update_traces(texttemplate="AED %{y:,.0f}")
+                asset_chart["amount_label"] = asset_chart["amount"].apply(money_text)
+                fig_assets.update_traces(text=asset_chart["amount_label"])
                 st.plotly_chart(style_bar_chart(fig_assets), use_container_width=True)
 
+                calc_assets_display = calc_assets_df.copy()
+                if "amount" in calc_assets_display.columns:
+                    calc_assets_display["amount"] = calc_assets_display["amount"].apply(money_text)
+
                 st.dataframe(
-                    calc_assets_df,
+                    calc_assets_display,
                     use_container_width=True,
                     hide_index=True,
                     column_config={
                         "component": "Component",
-                        "amount": st.column_config.NumberColumn("Amount", format="AED %.0f")
+                        "amount": "Amount"
                     }
                 )
 
             st.markdown("### Savings Only View")
             if not savings_only_df.empty:
+                savings_display = savings_only_df.copy()
+                for col in ["monthly_savings", "savings_per_day", "one_month", "two_months", "twelve_months"]:
+                    if col in savings_display.columns:
+                        savings_display[col] = savings_display[col].apply(money_text)
+
                 st.dataframe(
-                    savings_only_df,
+                    savings_display,
                     use_container_width=True,
                     hide_index=True,
                     column_config={
                         "scenario": "Scenario",
                         "period": "Period",
-                        "monthly_savings": st.column_config.NumberColumn("Monthly Savings", format="AED %.0f"),
-                        "savings_per_day": st.column_config.NumberColumn("Savings Per Day", format="AED %.0f"),
-                        "one_month": st.column_config.NumberColumn("1 Month", format="AED %.0f"),
-                        "two_months": st.column_config.NumberColumn("2 Months", format="AED %.0f"),
-                        "twelve_months": st.column_config.NumberColumn("12 Months", format="AED %.0f")
+                        "monthly_savings": "Monthly Savings",
+                        "savings_per_day": "Savings Per Day",
+                        "one_month": "1 Month",
+                        "two_months": "2 Months",
+                        "twelve_months": "12 Months"
                     }
                 )
 
@@ -2950,11 +3025,6 @@ Investment Plan.xlsx
                 c1.metric("Real Estate Value", f"AED {latest_real_estate['ending_balance']:,.0f}")
                 c2.metric("Starting Balance", f"AED {real_estate_start:,.0f}")
                 c3.metric("Expected Growth", f"AED {real_estate_growth:,.0f}")
-
-                insight_card(
-                    "Data Check",
-                    "Your real estate row shows AED 247,000 starting balance and AED 74,100 growth. The ending balance in the sheet is AED 675,235. Please confirm if this is intentional."
-                )
 
                 real_estate_chart = real_estate_data.copy()
                 real_estate_chart["value_label"] = (
