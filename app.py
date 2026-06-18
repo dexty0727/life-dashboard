@@ -58,23 +58,59 @@ def get_google_drive_credentials_path():
 
 
 def get_google_drive_credentials():
+    """Get Google Drive credentials from Streamlit Cloud secrets first, then local credentials.json.
 
+    This makes the same app work in both places:
+    - Streamlit Cloud: uses st.secrets
+    - Local laptop: uses C:\\LifeDashboard\\credentials.json
+    """
+
+    # Option 1: Streamlit Cloud secrets using [gdrive_service_account]
     try:
-        if "GOOGLE_SERVICE_ACCOUNT_JSON" in st.secrets:
-            import json
+        if "gdrive_service_account" in st.secrets:
+            service_account_info = dict(st.secrets["gdrive_service_account"])
 
-            google_json = st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"]["json"]
-            service_account_info = json.loads(google_json)
+            if "private_key" in service_account_info:
+                service_account_info["private_key"] = (
+                    str(service_account_info["private_key"])
+                    .replace("\\n", "\n")
+                )
 
             return service_account.Credentials.from_service_account_info(
                 service_account_info,
                 scopes=GOOGLE_DRIVE_SCOPES
             )
-
     except Exception as e:
-        st.warning(f"Google Drive cloud credentials failed: {e}")
+        st.warning(f"Could not read Google credentials from [gdrive_service_account] secrets: {e}")
 
-    credentials_path = Path(r"C:\LifeDashboard\credentials.json")
+    # Option 2: Streamlit Cloud secrets using one full JSON string
+    try:
+        if "GOOGLE_SERVICE_ACCOUNT_JSON" in st.secrets:
+            raw_secret = st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"]
+
+            # Supports both formats:
+            # 1) GOOGLE_SERVICE_ACCOUNT_JSON = '''{...}'''
+            # 2) [GOOGLE_SERVICE_ACCOUNT_JSON] with json = '''{...}'''
+            if isinstance(raw_secret, dict):
+                raw_secret = raw_secret.get("json", "")
+
+            service_account_info = json.loads(raw_secret)
+
+            if "private_key" in service_account_info:
+                service_account_info["private_key"] = (
+                    str(service_account_info["private_key"])
+                    .replace("\\n", "\n")
+                )
+
+            return service_account.Credentials.from_service_account_info(
+                service_account_info,
+                scopes=GOOGLE_DRIVE_SCOPES
+            )
+    except Exception as e:
+        st.warning(f"Could not read Google credentials from GOOGLE_SERVICE_ACCOUNT_JSON secrets: {e}")
+
+    # Option 3: Local machine fallback
+    credentials_path = get_google_drive_credentials_path()
 
     if credentials_path.exists():
         return service_account.Credentials.from_service_account_file(
@@ -102,34 +138,14 @@ def has_google_drive_credentials():
 
 
 def should_use_google_drive():
-
     enabled = get_secret_value("google_drive", "enabled", False)
     folder_id = get_secret_value("google_drive", "folder_id", "")
-
-    has_cloud_json = False
-    has_cloud_toml = False
-
-    try:
-        has_cloud_json = bool(st.secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON", None))
-    except Exception:
-        pass
-
-    try:
-        has_cloud_toml = "gdrive_service_account" in st.secrets
-    except Exception:
-        pass
-
-    has_local_credentials = Path(r"C:\LifeDashboard\credentials.json").exists()
 
     return bool(
         enabled
         and folder_id
+        and has_google_drive_credentials()
         and GOOGLE_DRIVE_AVAILABLE
-        and (
-            has_cloud_json
-            or has_cloud_toml
-            or has_local_credentials
-        )
     )
 
 
@@ -879,6 +895,195 @@ def parse_investment_workbook(raw, source_file):
     return investments
 
 
+
+# -----------------------------
+# Financial Planning Loader
+# -----------------------------
+def load_all_financial_planning_files():
+    planning_files = []
+    patterns = [
+        "*FinancialPlanning*.xlsx",
+        "*financialplanning*.xlsx",
+        "*Financial_Planning*.xlsx",
+        "*financial_planning*.xlsx",
+        "*Planning*.xlsx",
+        "*planning*.xlsx"
+    ]
+
+    for pattern in patterns:
+        planning_files.extend(sorted(DATA_FOLDER.glob(pattern)))
+
+    planning_files = sorted({
+        file for file in planning_files
+        if not file.name.startswith("~$")
+        and "investment" not in file.name.lower()
+        and "expenses" not in file.name.lower()
+    })
+
+    if not planning_files:
+        return None, []
+
+    parsed_files = []
+
+    for file in planning_files:
+        try:
+            raw = pd.read_excel(file, sheet_name=0, header=None)
+            parsed = parse_financial_planning_workbook(raw, file.name)
+            if parsed is not None:
+                parsed_files.append(parsed)
+        except Exception as e:
+            st.warning(f"Could not read planning file {file.name}: {e}")
+
+    if not parsed_files:
+        return None, planning_files
+
+    # For now, use the latest/last matching file as the planning model.
+    # This keeps the dashboard simple and avoids accidental duplicates.
+    return parsed_files[-1], planning_files
+
+
+def safe_number(value):
+    return pd.to_numeric(value, errors="coerce")
+
+
+def money_text(value, currency="AED"):
+    value = safe_number(value)
+    if pd.isna(value):
+        return "-"
+    return f"{currency} {value:,.0f}"
+
+
+def percent_text(value):
+    value = safe_number(value)
+    if pd.isna(value):
+        return "-"
+    return f"{value * 100:.2f}%"
+
+
+def parse_financial_planning_workbook(raw, source_file):
+    planning = {
+        "source_file": source_file,
+        "scenarios": pd.DataFrame(),
+        "living_costs": pd.DataFrame(),
+        "savings_only": pd.DataFrame(),
+        "calc_main": pd.DataFrame(),
+        "calc_assets": pd.DataFrame(),
+        "calc_summary": pd.DataFrame()
+    }
+
+    # Scenario blocks are laid out side-by-side in the uploaded workbook.
+    scenario_starts = [8, 16, 24]
+    scenario_names = [
+        "Scenario 1 - With All Investments",
+        "Scenario 2 - Without Indian Savings",
+        "Scenario 3 - Without Indian Savings + Real Estate"
+    ]
+
+    scenario_rows = []
+    living_rows = []
+    savings_rows = []
+
+    for scenario_name, start_col in zip(scenario_names, scenario_starts):
+        # Main projection table: rows 2 to 6, columns start_col to start_col + 6
+        for row_idx in range(2, 7):
+            period = raw.iloc[row_idx, start_col]
+            if pd.isna(period):
+                continue
+
+            scenario_rows.append({
+                "scenario": scenario_name,
+                "period": str(period).strip(),
+                "total_value": safe_number(raw.iloc[row_idx, start_col + 1]),
+                "monthly_low_7": safe_number(raw.iloc[row_idx, start_col + 2]),
+                "monthly_avg_12": safe_number(raw.iloc[row_idx, start_col + 3]),
+                "monthly_best_20": safe_number(raw.iloc[row_idx, start_col + 4]),
+                "experiment_loss_pct": safe_number(raw.iloc[row_idx, start_col + 5]),
+                "freedom_cost_pct": safe_number(raw.iloc[row_idx, start_col + 6])
+            })
+
+        # Monthly lifestyle cost section: rows 13 to 18
+        for row_idx in range(13, 19):
+            item = raw.iloc[row_idx, start_col]
+            amount = raw.iloc[row_idx, start_col + 1]
+            if pd.isna(item) or pd.isna(amount):
+                continue
+
+            living_rows.append({
+                "scenario": scenario_name,
+                "cost_item": str(item).strip(),
+                "monthly_amount": safe_number(amount)
+            })
+
+        # Savings only section: rows 20 to 24
+        for row_idx in range(20, 25):
+            period = raw.iloc[row_idx, start_col]
+            if pd.isna(period):
+                continue
+
+            savings_rows.append({
+                "scenario": scenario_name,
+                "period": str(period).strip(),
+                "monthly_savings": safe_number(raw.iloc[row_idx, start_col + 1]),
+                "savings_per_day": safe_number(raw.iloc[row_idx, start_col + 2]),
+                "one_month": safe_number(raw.iloc[row_idx, start_col + 3]),
+                "two_months": safe_number(raw.iloc[row_idx, start_col + 4]),
+                "twelve_months": safe_number(raw.iloc[row_idx, start_col + 5])
+            })
+
+    planning["scenarios"] = pd.DataFrame(scenario_rows)
+    planning["living_costs"] = pd.DataFrame(living_rows)
+    planning["savings_only"] = pd.DataFrame(savings_rows)
+
+    # Calculation block on the left side.
+    calc_main_rows = []
+    for row_idx in range(3, 10):
+        item = raw.iloc[row_idx, 0]
+        if pd.isna(item):
+            continue
+        calc_main_rows.append({
+            "component": str(item).strip(),
+            "2_years_value": safe_number(raw.iloc[row_idx, 1]),
+            "2_years_alt": safe_number(raw.iloc[row_idx, 2]),
+            "3_years_value": safe_number(raw.iloc[row_idx, 3]),
+            "3_years_alt": safe_number(raw.iloc[row_idx, 4]),
+            "4_years_value": safe_number(raw.iloc[row_idx, 5]),
+            "4_years_alt": safe_number(raw.iloc[row_idx, 6])
+        })
+
+    planning["calc_main"] = pd.DataFrame(calc_main_rows)
+
+    calc_asset_rows = []
+    for row_idx in range(14, 24):
+        item = raw.iloc[row_idx, 0]
+        if pd.isna(item):
+            continue
+        calc_asset_rows.append({
+            "component": str(item).strip(),
+            "amount": safe_number(raw.iloc[row_idx, 1])
+        })
+
+    planning["calc_assets"] = pd.DataFrame(calc_asset_rows)
+
+    calc_summary_rows = []
+    summary_map = {
+        "Starting Portfolio": 25,
+        "12 Month Salary Savings": 26,
+        "Projected 2 Year Capital": 27,
+        "Projected 4 Year Capital": 28
+    }
+
+    for label, row_idx in summary_map.items():
+        calc_summary_rows.append({
+            "metric": label,
+            "with_all_investments": safe_number(raw.iloc[row_idx, 1]),
+            "without_indian_savings": safe_number(raw.iloc[row_idx, 2]),
+            "without_indian_and_real_estate": safe_number(raw.iloc[row_idx, 3])
+        })
+
+    planning["calc_summary"] = pd.DataFrame(calc_summary_rows)
+
+    return planning
+
 # -----------------------------
 # Chart Styling
 # -----------------------------
@@ -1254,16 +1459,10 @@ def score_activity(avg_steps):
 sleep, activity, vitals, sleep_files, activity_files, vitals_files = load_ringconn_data()
 expenses, expense_files = load_all_expense_files()
 investments, investment_files = load_all_investment_files()
+planning, planning_files = load_all_financial_planning_files()
 workouts, workout_files = load_all_workout_files()
 
 if sleep is None or activity is None or vitals is None:
-    st.error("Data loading stopped before dashboard could open.")
-
-    st.write("DATA_SOURCE_LABEL:", DATA_SOURCE_LABEL)
-    st.write("DATA_SOURCE_DETAIL:", DATA_SOURCE_DETAIL)
-    st.write("GOOGLE_DRIVE_STATUS:", GOOGLE_DRIVE_STATUS)
-    st.write("ACTIVE DATA_FOLDER:", DATA_FOLDER)
-
     st.warning(f"Add your monthly RingConn CSV files to {DATA_FOLDER}.")
     st.code("""
 sleep_2026_06.csv
@@ -1335,6 +1534,9 @@ with st.sidebar:
 
     if investment_files:
         st.write(f"📈 Investments: {len(investment_files)} files")
+
+    if planning_files:
+        st.write(f"🗓️ Planning: {len(planning_files)} files")
 
     st.divider()
     st.caption("⚡ Tip: Drop new monthly files into the data folder and refresh.")
@@ -2228,10 +2430,292 @@ expenses_2026_06.xlsx
 # -----------------------------
 if page == "Planning":
     section_header(
-        "🗓️ Planning",
-        "Future planning tools will live here."
+        "🗓️ Financial Planning",
+        "Scenario planning, financial freedom runway, future income views, and calculation engine."
     )
-    st.info("Coming next.")
+
+    if planning is None:
+        st.info(f"Add your financial planning Excel file to {DATA_FOLDER}.")
+        st.code("""
+Venkat_FinancialPlanning.xlsx
+        """)
+    else:
+        scenarios_df = planning.get("scenarios", pd.DataFrame()).copy()
+        living_costs_df = planning.get("living_costs", pd.DataFrame()).copy()
+        savings_only_df = planning.get("savings_only", pd.DataFrame()).copy()
+        calc_main_df = planning.get("calc_main", pd.DataFrame()).copy()
+        calc_assets_df = planning.get("calc_assets", pd.DataFrame()).copy()
+        calc_summary_df = planning.get("calc_summary", pd.DataFrame()).copy()
+
+        st.markdown(
+            f"""
+            <span class="success-pill">
+                🗂️ Planning file loaded: {planning.get('source_file', 'Financial Planning Workbook')}
+            </span>
+            """,
+            unsafe_allow_html=True
+        )
+
+        scenario_tab, calculation_tab = st.tabs([
+            "🌍 Scenarios",
+            "🧮 Calculations"
+        ])
+
+        with scenario_tab:
+            if scenarios_df.empty:
+                st.warning("Planning file found, but no scenario rows could be parsed.")
+            else:
+                period_order = {
+                    "current": 0,
+                    "one year": 1,
+                    "1 year": 1,
+                    "2 years": 2,
+                    "3 years": 3,
+                    "4 years - until 2030": 4,
+                    "4 years": 4
+                }
+
+                scenarios_df["period_sort"] = (
+                    scenarios_df["period"]
+                    .astype(str)
+                    .str.lower()
+                    .map(period_order)
+                    .fillna(99)
+                )
+                scenarios_df = scenarios_df.sort_values(["scenario", "period_sort"])
+
+                latest_scenarios = (
+                    scenarios_df
+                    .sort_values(["scenario", "period_sort"])
+                    .groupby("scenario", as_index=False)
+                    .tail(1)
+                )
+
+                current_scenarios = scenarios_df[
+                    scenarios_df["period"].astype(str).str.lower() == "current"
+                ].copy()
+
+                scenario_names = list(scenarios_df["scenario"].dropna().unique())
+                scenario_columns = st.columns(len(scenario_names))
+
+                for col, scenario_name in zip(scenario_columns, scenario_names):
+                    scenario_data = scenarios_df[scenarios_df["scenario"] == scenario_name].copy()
+                    current_row = scenario_data.iloc[0]
+                    final_row = scenario_data.iloc[-1]
+
+                    short_name = scenario_name.replace("Scenario 1 - ", "").replace("Scenario 2 - ", "").replace("Scenario 3 - ", "")
+
+                    with col:
+                        st.markdown(
+                            f"""
+                            <div class="section-card">
+                                <div class="section-title">{short_name}</div>
+                                <div class="section-subtitle">Current to 4-year financial planning view.</div>
+                            </div>
+                            """,
+                            unsafe_allow_html=True
+                        )
+                        st.metric("Current Portfolio", money_text(current_row["total_value"]))
+                        st.metric("4-Year Portfolio", money_text(final_row["total_value"]))
+                        st.metric("Monthly Income @ 12%", money_text(final_row["monthly_avg_12"]))
+                        st.metric("Monthly Income @ 20%", money_text(final_row["monthly_best_20"]))
+                        st.metric("Freedom Cost %", percent_text(final_row["freedom_cost_pct"]))
+
+                st.divider()
+
+                chart_df = scenarios_df.copy()
+                chart_df["period_label"] = chart_df["period"].astype(str)
+
+                fig_portfolio_scenarios = px.line(
+                    chart_df,
+                    x="period_label",
+                    y="total_value",
+                    color="scenario",
+                    markers=True,
+                    title="Scenario Portfolio Value Growth",
+                    text="total_value"
+                )
+                fig_portfolio_scenarios.update_traces(
+                    texttemplate="AED %{y:,.0f}",
+                    textposition="top center"
+                )
+                st.plotly_chart(style_chart_base(fig_portfolio_scenarios), use_container_width=True)
+
+                fig_income_scenarios = px.line(
+                    chart_df,
+                    x="period_label",
+                    y="monthly_avg_12",
+                    color="scenario",
+                    markers=True,
+                    title="Projected Monthly Income at 12%",
+                    text="monthly_avg_12"
+                )
+                fig_income_scenarios.update_traces(
+                    texttemplate="AED %{y:,.0f}",
+                    textposition="top center"
+                )
+                st.plotly_chart(style_chart_base(fig_income_scenarios), use_container_width=True)
+
+                freedom_df = latest_scenarios.copy()
+                freedom_df["freedom_cost_label"] = (freedom_df["freedom_cost_pct"] * 100).round(2).astype(str) + "%"
+
+                fig_freedom = px.bar(
+                    freedom_df,
+                    x="scenario",
+                    y="freedom_cost_pct",
+                    text="freedom_cost_label",
+                    title="Financial Freedom Cost % at 4 Years"
+                )
+                fig_freedom.update_layout(yaxis_tickformat=".2%")
+                st.plotly_chart(style_bar_chart(fig_freedom), use_container_width=True)
+
+                st.markdown("### Scenario Table")
+                scenario_display = scenarios_df[[
+                    "scenario",
+                    "period",
+                    "total_value",
+                    "monthly_low_7",
+                    "monthly_avg_12",
+                    "monthly_best_20",
+                    "experiment_loss_pct",
+                    "freedom_cost_pct"
+                ]].copy()
+
+                st.dataframe(
+                    scenario_display,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "scenario": "Scenario",
+                        "period": "Period",
+                        "total_value": st.column_config.NumberColumn("Total Value", format="AED %.0f"),
+                        "monthly_low_7": st.column_config.NumberColumn("Monthly @ 7%", format="AED %.0f"),
+                        "monthly_avg_12": st.column_config.NumberColumn("Monthly @ 12%", format="AED %.0f"),
+                        "monthly_best_20": st.column_config.NumberColumn("Monthly @ 20%", format="AED %.0f"),
+                        "experiment_loss_pct": st.column_config.NumberColumn("Experiment Loss %", format="%.2f%%"),
+                        "freedom_cost_pct": st.column_config.NumberColumn("Freedom Cost %", format="%.2f%%")
+                    }
+                )
+
+                st.markdown("### Monthly Lifestyle Cost")
+                if not living_costs_df.empty:
+                    living_display = living_costs_df.copy()
+                    st.dataframe(
+                        living_display,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "scenario": "Scenario",
+                            "cost_item": "Cost Item",
+                            "monthly_amount": st.column_config.NumberColumn("Monthly Amount", format="AED %.0f")
+                        }
+                    )
+
+        with calculation_tab:
+            st.markdown("### Financial Planning Calculation Engine")
+
+            if not calc_summary_df.empty:
+                summary_latest = calc_summary_df.copy()
+
+                summary_melt = summary_latest.melt(
+                    id_vars="metric",
+                    value_vars=[
+                        "with_all_investments",
+                        "without_indian_savings",
+                        "without_indian_and_real_estate"
+                    ],
+                    var_name="scenario",
+                    value_name="amount"
+                )
+
+                summary_melt["scenario"] = summary_melt["scenario"].replace({
+                    "with_all_investments": "With All Investments",
+                    "without_indian_savings": "Without Indian Savings",
+                    "without_indian_and_real_estate": "Without Indian + Real Estate"
+                })
+
+                fig_calc_summary = px.bar(
+                    summary_melt,
+                    x="metric",
+                    y="amount",
+                    color="scenario",
+                    text="amount",
+                    barmode="group",
+                    title="Capital Build-Up Summary"
+                )
+                fig_calc_summary.update_traces(texttemplate="AED %{y:,.0f}", textposition="outside")
+                st.plotly_chart(style_chart_base(fig_calc_summary), use_container_width=True)
+
+                st.dataframe(
+                    calc_summary_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "metric": "Metric",
+                        "with_all_investments": st.column_config.NumberColumn("With All Investments", format="AED %.0f"),
+                        "without_indian_savings": st.column_config.NumberColumn("Without Indian Savings", format="AED %.0f"),
+                        "without_indian_and_real_estate": st.column_config.NumberColumn("Without Indian + Real Estate", format="AED %.0f")
+                    }
+                )
+
+            st.markdown("### Salary, Bonus and Benefit Build-Up")
+            if not calc_main_df.empty:
+                st.dataframe(
+                    calc_main_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "component": "Component",
+                        "2_years_value": st.column_config.NumberColumn("2 Years Value", format="AED %.0f"),
+                        "2_years_alt": st.column_config.NumberColumn("2 Years Alt", format="AED %.0f"),
+                        "3_years_value": st.column_config.NumberColumn("3 Years Value", format="AED %.0f"),
+                        "3_years_alt": st.column_config.NumberColumn("3 Years Alt", format="AED %.0f"),
+                        "4_years_value": st.column_config.NumberColumn("4 Years Value", format="AED %.0f"),
+                        "4_years_alt": st.column_config.NumberColumn("4 Years Alt", format="AED %.0f")
+                    }
+                )
+
+            st.markdown("### Asset and Payout Assumptions")
+            if not calc_assets_df.empty:
+                asset_chart = calc_assets_df.copy().dropna(subset=["amount"])
+                asset_chart = asset_chart.sort_values("amount", ascending=False)
+
+                fig_assets = px.bar(
+                    asset_chart,
+                    x="component",
+                    y="amount",
+                    text="amount",
+                    title="Asset and Payout Assumptions"
+                )
+                fig_assets.update_traces(texttemplate="AED %{y:,.0f}")
+                st.plotly_chart(style_bar_chart(fig_assets), use_container_width=True)
+
+                st.dataframe(
+                    calc_assets_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "component": "Component",
+                        "amount": st.column_config.NumberColumn("Amount", format="AED %.0f")
+                    }
+                )
+
+            st.markdown("### Savings Only View")
+            if not savings_only_df.empty:
+                st.dataframe(
+                    savings_only_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "scenario": "Scenario",
+                        "period": "Period",
+                        "monthly_savings": st.column_config.NumberColumn("Monthly Savings", format="AED %.0f"),
+                        "savings_per_day": st.column_config.NumberColumn("Savings Per Day", format="AED %.0f"),
+                        "one_month": st.column_config.NumberColumn("1 Month", format="AED %.0f"),
+                        "two_months": st.column_config.NumberColumn("2 Months", format="AED %.0f"),
+                        "twelve_months": st.column_config.NumberColumn("12 Months", format="AED %.0f")
+                    }
+                )
 
 
 # -----------------------------
