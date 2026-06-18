@@ -1036,6 +1036,13 @@ def one_decimal_text(value):
     return indian_number_text(value, decimals=1)
 
 
+def planning_value_text(value, decimals=4):
+    value = safe_number(value)
+    if pd.isna(value):
+        return "-"
+    return f"{float(value):.{decimals}f}"
+
+
 def parse_financial_planning_workbook(raw, source_file):
     planning = {
         "source_file": source_file,
@@ -2584,6 +2591,7 @@ Venkat_FinancialPlanning.xlsx
                 if selected_planning_scenario == "All Scenarios":
                     filtered_scenarios = scenarios_df.copy()
                     filtered_living_costs = living_costs_df.copy()
+                    filtered_savings_only = savings_only_df.copy()
                     selected_label = "All Scenarios"
                 else:
                     filtered_scenarios = scenarios_df[
@@ -2592,6 +2600,9 @@ Venkat_FinancialPlanning.xlsx
                     filtered_living_costs = living_costs_df[
                         living_costs_df["scenario"] == selected_planning_scenario
                     ].copy() if not living_costs_df.empty and "scenario" in living_costs_df.columns else living_costs_df.copy()
+                    filtered_savings_only = savings_only_df[
+                        savings_only_df["scenario"] == selected_planning_scenario
+                    ].copy() if not savings_only_df.empty and "scenario" in savings_only_df.columns else savings_only_df.copy()
                     selected_label = selected_planning_scenario
 
                 latest_scenarios = (
@@ -2653,22 +2664,79 @@ Venkat_FinancialPlanning.xlsx
                 )
                 st.plotly_chart(style_chart_base(fig_portfolio_scenarios), use_container_width=True)
 
-                st.markdown("### Monthly Lifestyle Cost")
+                st.markdown("### Monthly Lifestyle Cost & Savings")
+
+                lifestyle_parts = []
+
                 if not filtered_living_costs.empty:
                     living_display = filtered_living_costs.copy()
-                    living_display["monthly_amount"] = living_display["monthly_amount"].apply(money_text)
+                    living_display["section"] = "Lifestyle Cost"
+                    living_display["item"] = living_display["cost_item"]
+                    living_display["monthly_amount"] = living_display["monthly_amount"]
+                    living_display["savings_per_day"] = None
+                    living_display["one_month"] = None
+                    living_display["two_months"] = None
+                    living_display["twelve_months"] = None
+                    lifestyle_parts.append(
+                        living_display[[
+                            "scenario",
+                            "section",
+                            "item",
+                            "monthly_amount",
+                            "savings_per_day",
+                            "one_month",
+                            "two_months",
+                            "twelve_months"
+                        ]]
+                    )
+
+                if not filtered_savings_only.empty:
+                    savings_display = filtered_savings_only.copy()
+                    savings_display["section"] = "Savings Only"
+                    savings_display["item"] = savings_display["period"]
+                    savings_display["monthly_amount"] = savings_display["monthly_savings"]
+                    lifestyle_parts.append(
+                        savings_display[[
+                            "scenario",
+                            "section",
+                            "item",
+                            "monthly_amount",
+                            "savings_per_day",
+                            "one_month",
+                            "two_months",
+                            "twelve_months"
+                        ]]
+                    )
+
+                if lifestyle_parts:
+                    lifestyle_display = pd.concat(lifestyle_parts, ignore_index=True)
+
+                    for col in [
+                        "monthly_amount",
+                        "savings_per_day",
+                        "one_month",
+                        "two_months",
+                        "twelve_months"
+                    ]:
+                        lifestyle_display[col] = lifestyle_display[col].apply(money_text)
+
                     st.dataframe(
-                        living_display,
+                        lifestyle_display,
                         use_container_width=True,
                         hide_index=True,
                         column_config={
                             "scenario": "Scenario",
-                            "cost_item": "Cost Item",
-                            "monthly_amount": "Monthly Amount"
+                            "section": "Section",
+                            "item": "Item / Period",
+                            "monthly_amount": "Monthly Cost / Savings",
+                            "savings_per_day": "Savings Per Day",
+                            "one_month": "Per Month",
+                            "two_months": "Per 2 Months",
+                            "twelve_months": "Per 12 Months"
                         }
                     )
                 else:
-                    st.info("No monthly lifestyle cost data found for the selected scenario.")
+                    st.info("No lifestyle cost or savings data found for the selected scenario.")
 
                 st.markdown("### Scenario Table")
                 scenario_display = filtered_scenarios[[
@@ -2685,8 +2753,8 @@ Venkat_FinancialPlanning.xlsx
                 for col in ["total_value", "monthly_low_7", "monthly_avg_12", "monthly_best_20"]:
                     scenario_display[col] = scenario_display[col].apply(money_text)
 
-                scenario_display["experiment_loss_pct"] = scenario_display["experiment_loss_pct"].apply(one_decimal_text)
-                scenario_display["freedom_cost_pct"] = scenario_display["freedom_cost_pct"].apply(one_decimal_text)
+                scenario_display["experiment_loss_pct"] = scenario_display["experiment_loss_pct"].apply(lambda x: planning_value_text(x, 4))
+                scenario_display["freedom_cost_pct"] = scenario_display["freedom_cost_pct"].apply(lambda x: planning_value_text(x, 4))
 
                 st.dataframe(
                     scenario_display,
@@ -2700,7 +2768,7 @@ Venkat_FinancialPlanning.xlsx
                         "monthly_avg_12": "Monthly @ 12%",
                         "monthly_best_20": "Monthly @ 20%",
                         "experiment_loss_pct": "Experiment Cost",
-                        "freedom_cost_pct": "Freedom Cost"
+                        "freedom_cost_pct": "Peace Stocks Cost"
                     }
                 )
 
