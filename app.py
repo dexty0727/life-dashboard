@@ -1281,6 +1281,13 @@ investments, investment_files = load_all_investment_files()
 workouts, workout_files = load_all_workout_files()
 
 if sleep is None or activity is None or vitals is None:
+    st.error("Data loading stopped before dashboard could open.")
+
+    st.write("DATA_SOURCE_LABEL:", DATA_SOURCE_LABEL)
+    st.write("DATA_SOURCE_DETAIL:", DATA_SOURCE_DETAIL)
+    st.write("GOOGLE_DRIVE_STATUS:", GOOGLE_DRIVE_STATUS)
+    st.write("ACTIVE DATA_FOLDER:", DATA_FOLDER)
+
     st.warning(f"Add your monthly RingConn CSV files to {DATA_FOLDER}.")
     st.code("""
 sleep_2026_06.csv
